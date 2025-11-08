@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from typing import List, Optional
 from datetime import datetime
 
 from app.models.schemas import (
@@ -48,30 +49,56 @@ async def health_check():
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
-    Handle a user's chat message.
-    This uses a MOCK AI response to test the MongoDB and Snowflake data pipeline.
+    Handle a user's chat message and return an AI response.
+    Orchestrates MongoDB, Gemini, Snowflake, and optionally Veo.
     """
     try:
-        # 1. Get user data & history from MongoDB (to prove it's working)
+        # 1. Get user data & history from MongoDB
         user_profile = await mongodb_service.get_user_profile(request.user_id)
         if not user_profile:
             user_profile = {"user_id": request.user_id, "name": "User"}
         
         history = await mongodb_service.get_conversation_history(request.user_id)
-        print(f"Retrieved {len(history)} history items for user {request.user_id}")
 
-        # 2. --- MOCK GEMINI RESPONSE ---
-        # This block simulates the output from GeminiService
+        # 2. Call Gemini service for text response
         gemini_response = await gemini_service.generate_response(
             user_message=request.message,
             conversation_history=history,
             user_profile=user_profile,
             mode=request.mode
         )
-        # -------------------------------
         
-        # 3. (Future) Generate short video clip of avatar
-        video_url_placeholder = "https://storage.googleapis.com/ekho-placeholder-video.mp4"
+        # 3. Handle video generation
+        video_url_to_return: Optional[str] = None
+        video_job_id_to_return: Optional[str] = None
+        
+        if request.make_video:
+            print(f"🎬 Kicking off video generation for user {request.user_id}...")
+            # Use the AI text as the prompt for the video
+            video_prompt = gemini_response["text"]
+            
+            # Estimate duration based on text length (e.g., 1 sec per 15 chars)
+            estimated_duration = max(5, min(30, len(video_prompt) // 15))
+
+            try:
+                # Call the Veo service you already have
+                video_job_result = await veo_service.generate_avatar_video(
+                    user_id=request.user_id,
+                    prompt=video_prompt,
+                    reference_images=[], # You'll need to fetch real avatar refs
+                    duration=estimated_duration,
+                    style="conversational"
+                )
+                video_job_id_to_return = video_job_result.get("job_id")
+            
+            except Exception as e:
+                print(f"❌ Error during video job kickoff: {str(e)}")
+                # Don't fail the chat, just note the video error
+                video_job_id_to_return = f"error: {str(e)}"
+
+        else:
+            # If no video is requested, return the placeholder
+            video_url_to_return = "https://storage.googleapis.com/ekho-placeholder-video.mp4"
 
         # 4. Save conversation to MongoDB
         await mongodb_service.save_conversation(
@@ -92,15 +119,15 @@ async def chat(request: ChatRequest):
                 sentiment_score=sentiment_score
             )
         except Exception as e:
-            # Don't fail the chat request if analytics fails
             print(f"Snowflake logging failed: {e}")
 
-        # 6. Return response text + video URL
+        # 6. Return response to user
         return ChatResponse(
             text=gemini_response["text"],
-            video_url=video_url_placeholder, # Use placeholder for now
-            mode=gemini_response["mode"],
-            emotional_tone=gemini_response["emotional_tone"]
+            video_url=video_url_to_return,
+            video_job_id=video_job_id_to_return,
+            mode=gemini_response.get("mode"),
+            emotional_tone=gemini_response.get("emotional_tone")
         )
         
     except Exception as e:
