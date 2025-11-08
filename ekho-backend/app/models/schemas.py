@@ -60,3 +60,14 @@ class HealthCheckResponse(BaseModel):
     service: str
     timestamp: str
     google_cloud_connected: bool
+
+class ChatRequest(BaseModel):
+    user_id: str = Field(..., description="The unique ID of the user")
+    message: str = Field(..., description="The text message from the user")
+    mode: Optional[str] = Field(None, description="Optional manual override for conversation mode")
+
+class ChatResponse(BaseModel):
+    text: str = Field(..., description="The AI-generated text response")
+    video_url: str = Field(..., description="The URL to the generated video response (will be placeholder first)")
+    mode: str = Field(..., description="The conversation mode used for the response")
+    emotional_tone: str = Field(..., description="The analyzed emotional tone of the AI response")

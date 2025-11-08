@@ -6,13 +6,33 @@ from app.models.schemas import (
     VideoGenerationResponse,
     VideoStatusResponse,
     AvatarCreationRequest,
-    HealthCheckResponse
+    HealthCheckResponse,
+    ChatRequest,
+    ChatResponse
 )
-from app.services.veo_service import veo_service
-from app.services.storage_service import storage_service
-from datetime import datetime
+from app.services.veo_service import VeoService
+from app.services.storage_service import StorageService
+from app.services.mongodb_service import MongoDBService
+from app.services.snowflake_service import SnowflakeService
+from app.services.gemini_service import GeminiService #TODO: Needs gemini service implementation
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/api/v1", tags=["ekho"])
+
+storage_service = StorageService()
+veo_service = VeoService()
+mongodb_service = MongoDBService()
+snowflake_service = SnowflakeService()
+gemini_service = GeminiService()
+
+def _calculate_sentiment(emotional_tag: str) -> float:
+    """Converts a string emotion tag into a numeric score for analytics."""
+    tag = emotional_tag.lower()
+    if tag in ["anxious", "sad", "worried", "error"]:
+        return -0.5
+    if tag in ["happy", "hopeful", "calm", "energetic"]:
+        return 0.5
+    return 0.0
 
 @router.get("/health", response_model=HealthCheckResponse)
 async def health_check():
@@ -23,9 +43,71 @@ async def health_check():
     return HealthCheckResponse(
         status="healthy" if storage_connected else "degraded",
         service="ekho-api",
-        timestamp=datetime.utcnow().isoformat(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
         google_cloud_connected=storage_connected
     )
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Handle a user's chat message.
+    This uses a MOCK AI response to test the MongoDB and Snowflake data pipeline.
+    """
+    try:
+        # 1. Get user data & history from MongoDB (to prove it's working)
+        user_profile = await mongodb_service.get_user_profile(request.user_id)
+        if not user_profile:
+            user_profile = {"user_id": request.user_id, "name": "User"}
+        
+        history = await mongodb_service.get_conversation_history(request.user_id)
+        print(f"Retrieved {len(history)} history items for user {request.user_id}")
+
+        # 2. --- MOCK GEMINI RESPONSE ---
+        # This block simulates the output from GeminiService
+        gemini_response = await gemini_service.generate_response(
+            user_message=request.message,
+            conversation_history=history,
+            user_profile=user_profile,
+            mode=request.mode
+        )
+        # -------------------------------
+        
+        # 3. (Future) Generate short video clip of avatar
+        video_url_placeholder = "https://storage.googleapis.com/ekho-placeholder-video.mp4"
+
+        # 4. Save conversation to MongoDB
+        await mongodb_service.save_conversation(
+            user_id=request.user_id,
+            user_message=request.message,
+            ai_response=gemini_response["text"],
+            emotional_tag=gemini_response["emotional_tone"],
+            mode=gemini_response["mode"]
+        )
+
+        # 5. Log analytics to Snowflake
+        try:
+            sentiment_score = _calculate_sentiment(gemini_response["emotional_tone"])
+            await snowflake_service.log_conversation_analytic(
+                user_id=request.user_id,
+                emotional_tag=gemini_response["emotional_tone"],
+                conversation_mode=gemini_response["mode"],
+                sentiment_score=sentiment_score
+            )
+        except Exception as e:
+            # Don't fail the chat request if analytics fails
+            print(f"Snowflake logging failed: {e}")
+
+        # 6. Return response text + video URL
+        return ChatResponse(
+            text=gemini_response["text"],
+            video_url=video_url_placeholder, # Use placeholder for now
+            mode=gemini_response["mode"],
+            emotional_tone=gemini_response["emotional_tone"]
+        )
+        
+    except Exception as e:
+        print(f"❌ Error in /chat endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/generate-avatar", response_model=VideoGenerationResponse)
 async def generate_avatar(

@@ -31,9 +31,13 @@ class Settings(BaseSettings):
     snowflake_user: str
     snowflake_password: str
     snowflake_account: str
+
+    # MongoDB variables
+    mongodb_uri: str
     
     class Config:
         env_file = ".env"
+        env_file_encoding = "utf-8"
         case_sensitive = False
 
 @lru_cache()
