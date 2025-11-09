@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Optional
 from datetime import datetime, timezone
+from app.config import get_settings
 
 from app.models.schemas import (
     VideoGenerationRequest,
@@ -12,7 +13,7 @@ from app.models.schemas import (
     ChatRequest,
     ChatResponse,
 )
-from app.services.veo_service import VeoService
+from app.services.veo_service import VeoServiceREST
 from app.services.storage_service import StorageService
 from app.services.mongodb_service import MongoDBService
 from app.services.snowflake_service import SnowflakeService
@@ -23,8 +24,17 @@ from app.services.adk_service import adk_service
 
 router = APIRouter(prefix="/api/v1", tags=["ekho"])
 
+settings = get_settings()
+
 storage_service = StorageService()
-veo_service = VeoService()
+
+default_output_uri = f"gs://{settings.storage_bucket}/video-outputs/"
+
+veo_service = VeoServiceREST(project_id=settings.google_cloud_project,
+                             location=settings.google_cloud_location,
+                             model_id="veo-3.1-fast-generate-preview",
+                             output_storage_uri=default_output_uri
+                             )
 mongodb_service = MongoDBService()
 snowflake_service = SnowflakeService()
 gemini_service = GeminiService()
