@@ -1,208 +1,372 @@
+import os
 import uuid
-from typing import List, Dict
+import logging
 from datetime import datetime
-import asyncio
+from typing import List, Dict
 
-from app.config import get_settings
-from app.models.schemas import VideoStyle
+import httpx
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+
 from app.services.storage_service import storage_service
 
-settings = get_settings()
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-class VeoService:
+
+def guess_mime(uri: str) -> str:
+    u = uri.lower()
+    if u.endswith(".png"):
+        return "image/png"
+    return "image/jpeg"
+
+
+class VeoServiceREST:
     """
-    Service for Veo 3.1 video generation.
-    Handles avatar creation and custom video generation.
+    Veo 3.1 integration using:
+      - Service account credentials (GOOGLE_APPLICATION_CREDENTIALS)
+      - Vertex AI publisher model endpoint
+      - predictLongRunning + fetchPredictOperation
+      - Reference images stored in GCS
     """
-    
-    def __init__(self):
-        # In-memory job storage (replace with Redis/database in production)
+
+    def __init__(self, project_id: str, location: str,
+                 model_id: str, output_storage_uri: str):
+        self.project_id = project_id
+        self.location = location
+        self.model_id = model_id
+        self.output_storage_uri = output_storage_uri.rstrip("/") + "/"
         self.jobs: Dict[str, Dict] = {}
-    
+
+        sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if not sa_path or not os.path.exists(sa_path):
+            raise RuntimeError(
+                f"GOOGLE_APPLICATION_CREDENTIALS not set or file not found: {sa_path}"
+            )
+
+        self.credentials = service_account.Credentials.from_service_account_file(
+            sa_path,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        logger.info("VeoServiceREST: using service account from %s", sa_path)
+
+    # ---------- Auth ----------
+
+    def get_access_token(self) -> str:
+        if not self.credentials.valid:
+            self.credentials.refresh(Request())
+        return self.credentials.token
+
+    # ---------- Public APIs used by your routes ----------
+
+    async def create_aged_avatar(
+        self,
+        user_id: str,
+        face_captures: List[str],
+        age_years: int = 10,
+    ) -> Dict:
+        """
+        Called by /generate-avatar.
+        Takes base64 face captures, generates an 8s aged avatar.
+        """
+        duration_seconds = 8  # Veo requires 8s for reference_to_video
+
+        prompt = (
+            f"Portrait video of this person, aged {age_years} years older. "
+            f"Natural, calm expression, subtle smile, direct eye contact, "
+            f"soft professional lighting, neutral background."
+        )
+
+        return await self._create_job(
+            user_id=user_id,
+            prompt=prompt,
+            face_captures=face_captures,
+            duration_seconds=duration_seconds,
+        )
+
     async def generate_avatar_video(
         self,
         user_id: str,
         prompt: str,
         reference_images: List[str],
-        duration: int = 10,
-        style: VideoStyle = VideoStyle.CONVERSATIONAL
+        duration: int,
+        style=None,
     ) -> Dict:
         """
-        Generate video with Veo 3.1 using reference images.
-        
-        Args:
-            user_id: User identifier
-            prompt: Video generation prompt
-            reference_images: Base64 encoded reference images
-            duration: Video duration in seconds
-            style: Video style preset
-            
-        Returns:
-            Job metadata dict
+        Called by /generate-video.
+        Uses provided prompt + reference_images.
+        We clamp to 8s for reference image -> video.
         """
+        duration_seconds = 8
+
+        return await self._create_job(
+            user_id=user_id,
+            prompt=prompt,
+            face_captures=reference_images,
+            duration_seconds=duration_seconds,
+        )
+
+    # ---------- Core job creation ----------
+
+    async def _create_job(
+        self,
+        user_id: str,
+        prompt: str,
+        face_captures: List[str],
+        duration_seconds: int,
+    ) -> Dict:
         job_id = f"veo_{user_id}_{uuid.uuid4().hex[:8]}"
-        
+        now = datetime.utcnow().isoformat()
+
         try:
-            # Step 1: Upload reference images to Cloud Storage
-            print(f"[{job_id}] Uploading {len(reference_images)} reference images...")
-            reference_urls = await storage_service.upload_reference_images(
-                user_id=user_id,
-                images=reference_images,
-                job_id=job_id
+            logger.info(
+                "[%s] Uploading %d reference images for %s",
+                job_id, len(face_captures[:3]), user_id
             )
-            print(f"[{job_id}] Reference images uploaded: {len(reference_urls)} URLs")
-            
-            # Step 2: Enhance prompt based on style
-            enhanced_prompt = self._enhance_prompt(prompt, style)
-            print(f"[{job_id}] Enhanced prompt: {enhanced_prompt[:100]}...")
-            
-            # Step 3: Create job metadata
-            job_metadata = {
+
+            gcs_uris = await storage_service.upload_reference_images(
+                user_id=user_id,
+                face_captures=face_captures[:3],
+                job_id=job_id,
+            )
+
+            if not gcs_uris:
+                raise RuntimeError("No reference images uploaded to GCS.")
+
+            logger.info("[%s] GCS URIs: %s", job_id, gcs_uris)
+
+            output_prefix = f"{self.output_storage_uri}{job_id}/"
+
+            body = {
+                "instances": [
+                    {
+                        "prompt": prompt,
+                        "referenceImages": [
+                            {
+                                "image": {
+                                    "gcsUri": uri,
+                                    "mimeType": guess_mime(uri),
+                                },
+                                "referenceType": "asset",
+                            }
+                            for uri in gcs_uris
+                        ],
+                    }
+                ],
+                "parameters": {
+                    "storageUri": output_prefix,
+                    "durationSeconds": duration_seconds,
+                    "aspectRatio": "16:9",
+                    "personGeneration": "allow_adult",
+                    "sampleCount": 1,
+                },
+            }
+
+            operation_name = await self._call_predict_long_running(body)
+
+            job = {
                 "job_id": job_id,
                 "user_id": user_id,
-                "status": "processing",
-                "progress": 10,
-                "prompt": prompt,
-                "enhanced_prompt": enhanced_prompt,
-                "duration": duration,
-                "style": style.value,
-                "reference_urls": reference_urls,
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
+                "status": "submitted",
+                "operation": operation_name,
+                "progress": 0,
                 "video_url": None,
-                "error": None
+                "error": None,
+                "created_at": now,
+                "updated_at": now,
             }
-            
-            # Store job
-            self.jobs[job_id] = job_metadata
-            
-            # Step 4: Start async video generation
-            asyncio.create_task(self._process_video_generation(job_id))
-            
-            return job_metadata
-            
+            self.jobs[job_id] = job
+
+            logger.info("[%s] Submitted Veo job: %s", job_id, operation_name)
+            return job
+
         except Exception as e:
-            error_job = {
+            logger.error(
+                "[%s] Job creation failed: %s: %s",
+                job_id, type(e).__name__, e, exc_info=True
+            )
+            err = {
                 "job_id": job_id,
                 "user_id": user_id,
                 "status": "failed",
+                "operation": None,
                 "progress": 0,
+                "video_url": None,
                 "error": str(e),
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat()
+                "created_at": now,
+                "updated_at": datetime.utcnow().isoformat(),
             }
-            self.jobs[job_id] = error_job
-            return error_job
-    
-    async def _process_video_generation(self, job_id: str):
-        """
-        Background task to generate video.
-        This simulates Veo API call - replace with actual API in production.
-        """
-        try:
-            job = self.jobs[job_id]
-            
-            # Simulate processing stages
-            stages = [
-                (30, "Analyzing reference images..."),
-                (50, "Generating video frames..."),
-                (70, "Applying style and consistency..."),
-                (90, "Rendering final video..."),
-            ]
-            
-            for progress, message in stages:
-                await asyncio.sleep(5)  # Simulate processing time
-                job["progress"] = progress
-                job["updated_at"] = datetime.utcnow().isoformat()
-                print(f"[{job_id}] {message} ({progress}%)")
-            
-            # Simulate successful completion
-            # In production: Call actual Veo API here
-            video_url = f"https://storage.googleapis.com/{settings.storage_bucket}/users/{job['user_id']}/videos/{job_id}.mp4"
-            
-            job["status"] = "completed"
-            job["progress"] = 100
-            job["video_url"] = video_url
-            job["updated_at"] = datetime.utcnow().isoformat()
-            
-            print(f"[{job_id}] ✅ Video generation completed!")
-            
-            # Cleanup reference images
-            await storage_service.cleanup_temp_files(job["user_id"], job_id)
-            
-        except Exception as e:
-            job["status"] = "failed"
-            job["error"] = str(e)
-            job["updated_at"] = datetime.utcnow().isoformat()
-            print(f"[{job_id}] ❌ Error: {str(e)}")
-    
-    def _enhance_prompt(self, prompt: str, style: VideoStyle) -> str:
-        """Add style-specific enhancements to prompt."""
-        
-        style_templates = {
-            VideoStyle.CINEMATIC: "Cinematic lighting, film grain, professional cinematography, 35mm lens. ",
-            VideoStyle.DOCUMENTARY: "Natural lighting, authentic documentary style, handheld camera feel. ",
-            VideoStyle.CONVERSATIONAL: "Warm lighting, friendly atmosphere, direct eye contact, natural expressions, slight smile. Indoor setting with soft natural light. ",
-            VideoStyle.EMOTIONAL: "Dramatic lighting, expressive faces, emotionally resonant atmosphere. "
-        }
-        
-        enhancement = style_templates.get(style, "")
-        consistency = "CRITICAL: Character consistency throughout. Same person in all frames. "
-        
-        return f"{enhancement}{consistency}{prompt}"
-    
-    async def create_aged_avatar(
-        self,
-        user_id: str,
-        face_captures: List[str],
-        age_years: int = 5
-    ) -> Dict:
-        """
-        Create aged avatar from face captures.
-        
-        Args:
-            user_id: User identifier
-            face_captures: Base64 encoded face images
-            age_years: Years to age the avatar
-            
-        Returns:
-            Job metadata dict
-        """
-        # Generate prompt for aged avatar
-        prompt = f"""
-        Portrait video of a person, aged {age_years} years older.
-        Gentle, natural facial movements. Calm breathing.
-        Slight smile, warm and approachable expression.
-        Making comfortable eye contact with camera.
-        Indoor setting with warm, soft lighting.
-        Subject appears wise, confident, and at peace.
-        30 seconds duration.
-        """
-        
-        return await self.generate_avatar_video(
-            user_id=user_id,
-            prompt=prompt,
-            reference_images=face_captures,
-            duration=30,
-            style=VideoStyle.CONVERSATIONAL
-        )
-    
+            self.jobs[job_id] = err
+            return err
+
+    # ---------- Status APIs ----------
+
     async def get_job_status(self, job_id: str) -> Dict:
-        """Get status of video generation job."""
-        
         job = self.jobs.get(job_id)
-        
         if not job:
             raise ValueError(f"Job {job_id} not found")
-        
-        return job
-    
-    def list_user_jobs(self, user_id: str) -> List[Dict]:
-        """Get all jobs for a user."""
-        return [
-            job for job in self.jobs.values()
-            if job["user_id"] == user_id
-        ]
 
-# Singleton instance
-veo_service = VeoService()
+        op_name = job.get("operation")
+        if not op_name:
+            return job
+
+        try:
+            op = await self._fetch_predict_operation(op_name)
+        except Exception as e:
+            logger.error(
+                "[%s] fetchPredictOperation failed: %s: %s",
+                job_id, type(e).__name__, e, exc_info=True
+            )
+            job["status"] = "error"
+            job["error"] = str(e)
+            job["updated_at"] = datetime.utcnow().isoformat()
+            return job
+
+        job["updated_at"] = datetime.utcnow().isoformat()
+
+        logger.info("[%s] fetchPredictOperation response: %s", job_id, op)
+
+        # Still running
+        if not op.get("done"):
+            job["status"] = "processing"
+            job.setdefault("progress", 10)
+            return job
+
+        # Done with error
+        if "error" in op and op["error"]:
+            job["status"] = "failed"
+            job["error"] = op["error"]
+            job["progress"] = 0
+            return job
+
+        # Done successfully
+        job["status"] = "completed"
+        job["progress"] = 100
+
+        resp = op.get("response") or {}
+
+        # Veo returns: { response: { videos: [ { gcsUri, mimeType } ] } }
+        videos = (
+            resp.get("videos")
+            or resp.get("generatedVideos")
+            or resp.get("generatedSamples", [])
+        )
+
+        video_uri = None
+        if videos:
+            v0 = videos[0]
+            video_uri = (
+                v0.get("gcsUri")
+                or v0.get("uri")
+                or v0.get("videoUri")
+            )
+
+        # Fallback: scan nested for anything that looks like a video URL
+        if not video_uri:
+            video_uri = self._find_any_video_url(resp) or self._find_any_video_url(op)
+
+        # If it's a gs:// URI, return a signed HTTPS URL so the browser can play it
+        if video_uri and video_uri.startswith("gs://"):
+            video_uri = storage_service.get_signed_url(video_uri)
+
+        job["video_url"] = video_uri
+        logger.info(
+            "[%s] Operation done. status=%s, video_url=%s",
+            job_id, job["status"], job.get("video_url")
+        )
+
+        job.setdefault("error", None)
+        return job
+
+    def list_user_jobs(self, user_id: str) -> List[Dict]:
+        return [j for j in self.jobs.values() if j.get("user_id") == user_id]
+
+    # ---------- Helpers ----------
+
+    def _find_any_video_url(self, data) -> str | None:
+        """
+        Recursively search for something that looks like a video URL or GCS URI.
+        """
+        if isinstance(data, dict):
+            for _, v in data.items():
+                if isinstance(v, str):
+                    if (v.startswith("gs://") or v.startswith("http")) and any(
+                        ext in v for ext in (".mp4", ".mov", ".webm", ".mkv")
+                    ):
+                        return v
+                found = self._find_any_video_url(v)
+                if found:
+                    return found
+        elif isinstance(data, list):
+            for item in data:
+                found = self._find_any_video_url(item)
+                if found:
+                    return found
+        return None
+
+    # ---------- Internal HTTP ----------
+
+    async def _call_predict_long_running(self, json_body: Dict) -> str:
+        token = self.get_access_token()
+        url = (
+            f"https://{self.location}-aiplatform.googleapis.com/v1/"
+            f"projects/{self.project_id}/locations/{self.location}"
+            f"/publishers/google/models/{self.model_id}:predictLongRunning"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, json=json_body)
+
+        if resp.status_code != 200:
+            logger.error(
+                "Veo predictLongRunning error %s: %s",
+                resp.status_code, resp.text
+            )
+            resp.raise_for_status()
+
+        data = resp.json()
+        op_name = data.get("name")
+        if not op_name:
+            raise RuntimeError(f"No operation name returned from Veo: {data}")
+        return op_name
+
+    async def _fetch_predict_operation(self, operation_name: str) -> Dict:
+        token = self.get_access_token()
+        url = (
+            f"https://{self.location}-aiplatform.googleapis.com/v1/"
+            f"projects/{self.project_id}/locations/{self.location}"
+            f"/publishers/google/models/{self.model_id}:fetchPredictOperation"
+        )
+        body = {"operationName": operation_name}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=body)
+
+        if resp.status_code != 200:
+            logger.error(
+                "Veo fetchPredictOperation error %s: %s",
+                resp.status_code, resp.text
+            )
+            resp.raise_for_status()
+
+        return resp.json()
+
+
+# Singleton instance used by your routes
+veo_service = VeoServiceREST(
+    project_id=os.getenv("GOOGLE_CLOUD_PROJECT", "ekho-477607"),
+    location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
+    model_id=os.getenv("VEO_MODEL_ID", "veo-3.1-generate-preview"),
+    output_storage_uri=os.getenv(
+        "VEO_OUTPUT_URI",
+        "gs://ekho-avatars-ekho-477607/output/",
+    ),
+)

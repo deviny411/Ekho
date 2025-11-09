@@ -263,15 +263,18 @@ async def get_video_status(job_id: str):
     """
     try:
         status = await veo_service.get_job_status(job_id)
+
         return VideoStatusResponse(
-            job_id=status["job_id"],
-            status=status["status"],
+            job_id=status.get("job_id", job_id),
+            status=status.get("status", "unknown"),
             progress=status.get("progress", 0),
             video_url=status.get("video_url"),
             error=status.get("error"),
             created_at=status.get("created_at", ""),
             updated_at=status.get("updated_at", ""),
         )
+
+        
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

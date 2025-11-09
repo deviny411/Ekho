@@ -1,8 +1,10 @@
+from dotenv import load_dotenv
+load_dotenv()  # MUST be first, before any app imports!
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.config import get_settings
-import os
 
 settings = get_settings()
 
@@ -14,10 +16,10 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware - allows frontend to call backend
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production: specify frontend domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,5 +53,5 @@ if __name__ == "__main__":
         "app.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True  # Auto-reload on code changes
+        reload=True
     )
