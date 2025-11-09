@@ -192,6 +192,7 @@ class VeoServiceREST:
                 "error": None,
                 "created_at": now,
                 "updated_at": now,
+                "gcs_uris": gcs_uris,
             }
             self.jobs[job_id] = job
 
