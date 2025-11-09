@@ -27,3 +27,7 @@ snowflake-connector-python==4.0.0
 
 # ElevenLabs
 elevenlabs
+
+# Voice analysis part
+librosa
+soundfile

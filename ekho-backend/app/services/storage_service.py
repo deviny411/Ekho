@@ -154,6 +154,3 @@ class StorageService:
             gcs_uri,
             expires_seconds
         )
-
-# Singleton instance
-storage_service = StorageService()

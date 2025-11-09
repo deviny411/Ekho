@@ -2,7 +2,7 @@ import snowflake.connector
 from app.config import get_settings
 from datetime import datetime, timezone
 import asyncio
-
+from typing import Dict, Any
 
 class SnowflakeService:
     def __init__(self):
@@ -12,6 +12,51 @@ class SnowflakeService:
         self.settings = get_settings()
         self.conn = None
         print("Snowflake Service initialized (but not connected).")
+        # Run setup in a non-blocking way
+        asyncio.create_task(self._setup_tables())
+
+
+    async def _setup_tables(self):
+        """
+        Ensures all required tables exist on startup.
+        """
+        print("Checking Snowflake table schemas...")
+        await self._ensure_connected()
+        try:
+            # --- 1. CONVERSATIONS TABLE ---
+            await asyncio.to_thread(
+                self.conn.cursor().execute,
+                """
+                CREATE TABLE IF NOT EXISTS EKHO_DB.ANALYTICS.conversations (
+                    user_id STRING,
+                    emotional_tag STRING,
+                    conversation_mode STRING,
+                    sentiment_score FLOAT,
+                    timestamp TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+                );
+                """
+            )
+            
+            # --- 2. NEW VOICE ANALYTICS TABLE ---
+            await asyncio.to_thread(
+                self.conn.cursor().execute,
+                """
+                CREATE TABLE IF NOT EXISTS EKHO_DB.ANALYTICS.voice_analytics (
+                    user_id STRING,
+                    pitch_mean_hz FLOAT,
+                    speech_rate_bpm FLOAT,
+                    pause_frequency_hz FLOAT,
+                    volume_variance FLOAT,
+                    duration_sec FLOAT,
+                    tag STRING,
+                    timestamp TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+                );
+                """
+            )
+            print("✅ Snowflake tables verified.")
+        except Exception as e:
+            print(f"❌ Failed to create/verify Snowflake tables: {e}")
+            self.conn = None # Force reconnect
 
     async def _connect(self):
         """
@@ -76,6 +121,44 @@ class SnowflakeService:
             print(f"Logged analytic for user {user_id} to Snowflake.")
         except Exception as e:
             print(f"❌ Failed to insert analytic into Snowflake: {e}")
+            self.conn = None # Force reconnect on next call
+    
+    # --- NEW FUNCTION FOR VOICE ANALYSIS ---
+    async def log_voice_analytic(
+        self, 
+        user_id: str, 
+        features: Dict[str, Any],
+        tag: str = "baseline"
+    ):
+        """
+        Insert voice analysis features into Snowflake (non-blocking).
+        """
+        await self._ensure_connected()
+        
+        query = """
+        INSERT INTO voice_analytics
+        (user_id, pitch_mean_hz, speech_rate_bpm, pause_frequency_hz, 
+         volume_variance, duration_sec, tag, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        try:
+            await asyncio.to_thread(
+                self.conn.cursor().execute,
+                query,
+                (
+                    user_id,
+                    features.get("pitch_mean_hz", 0.0),
+                    features.get("speech_rate_bpm", 0.0),
+                    features.get("pause_frequency_hz", 0.0),
+                    features.get("volume_variance", 0.0),
+                    features.get("duration_sec", 0.0),
+                    tag,
+                    datetime.now(timezone.utc)
+                )
+            )
+            print(f"Logged voice analytic for user {user_id} to Snowflake.")
+        except Exception as e:
+            print(f"❌ Failed to insert voice analytic into Snowflake: {e}")
             self.conn = None # Force reconnect on next call
 
     async def analyze_emotional_trends(self, user_id: str):

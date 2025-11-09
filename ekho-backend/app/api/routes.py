@@ -2,9 +2,10 @@ from fastapi import (
     APIRouter, HTTPException, BackgroundTasks, 
     UploadFile, File, Path
 )
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, timezone
 from app.config import get_settings
+import asyncio # <-- IMPORT ASYNCIO
 
 # --- 1. IMPORT ALL SCHEMAS ---
 from app.models.schemas import (
@@ -24,6 +25,7 @@ from app.services.mongodb_service import MongoDBService
 from app.services.snowflake_service import SnowflakeService
 from app.services.gemini_service import GeminiService
 from app.services.elevenlabs_service import ElevenLabsService
+from app.services.voice_analysis import VoiceAnalyzer # <-- IMPORT NEW SERVICE
 # 🔹 ADK orchestration
 from app.services.adk_service import ADKAgentService
 
@@ -33,6 +35,13 @@ router = APIRouter(prefix="/api/v1", tags=["ekho"])
 settings = get_settings()
 
 storage_service = StorageService()
+mongodb_service = MongoDBService()
+snowflake_service = SnowflakeService()
+gemini_service = GeminiService()
+elevenlabs_service = ElevenLabsService()
+voice_analyzer = VoiceAnalyzer() # <-- INSTANTIATE NEW SERVICE
+adk_service = ADKAgentService()
+
 
 default_output_uri = f"gs://{settings.storage_bucket}/video-outputs/"
 
@@ -41,11 +50,6 @@ veo_service = VeoServiceREST(project_id=settings.google_cloud_project,
                              model_id="veo-3.1-fast-generate-preview",
                              output_storage_uri=default_output_uri
                              )
-mongodb_service = MongoDBService()
-snowflake_service = SnowflakeService()
-gemini_service = GeminiService()
-elevenlabs_service = ElevenLabsService()
-adk_service = ADKAgentService()
 
 
 # --- 4. HELPER FUNCTION ---
@@ -67,19 +71,36 @@ async def clone_voice(
 ):
     """
     Accepts a 30-sec audio file, clones the voice,
-    and saves the voice_id to the user's profile.
+    analyzes its features, and saves all data.
     """
     try:
+        # Read file once, then run tasks in parallel
         audio_bytes = await audio_file.read()
         
-        # 1. Call the service to clone the voice
-        voice_id = await elevenlabs_service.clone_voice(audio_bytes, user_id)
+        clone_task = elevenlabs_service.clone_voice(audio_bytes, user_id)
+        analysis_task = voice_analyzer.analyze_voice_features(audio_bytes)
         
-        # 2. Save the new voice_id to the user's profile in MongoDB
+        # Run both operations concurrently
+        results = await asyncio.gather(clone_task, analysis_task)
+        
+        voice_id = results[0]
+        voice_features = results[1]
+        
+        # --- SAVE ALL RESULTS ---
+        
+        # 1. Save the new voice_id to the user's profile in MongoDB
         await mongodb_service.update_user_profile(
             user_id,
             {"voice_id": voice_id}
         )
+        
+        # 2. Save the voice features to Snowflake
+        if voice_features and "error" not in voice_features:
+            await snowflake_service.log_voice_analytic(
+                user_id, 
+                voice_features, 
+                tag="baseline_onboarding"
+            )
         
         return CloneVoiceResponse(
             user_id=user_id,
@@ -94,7 +115,8 @@ async def clone_voice(
 @router.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     """Health check endpoint to verify service is running."""
-    storage_connected = storage_service.check_connection()
+    # check_connection is now async, so it must be awaited
+    storage_connected = await storage_service.check_connection() # <-- FIXED
     return HealthCheckResponse(
         status="healthy" if storage_connected else "degraded",
         service="ekho-api",
@@ -111,10 +133,9 @@ async def chat_full(request: ChatRequest):
     """
     Handle a user's chat message and return an AI response.
     Orchestrates MongoDB, Gemini, Snowflake, and optionally Veo.
-    (Legacy/full flow; kept for reference, now uses gemini_service.generate)
     """
     try:
-        # 1) Get user data & history from MongoDB (non-blocking behavior unchanged)
+        # 1) Get user data & history from MongoDB
         user_profile = await mongodb_service.get_user_profile(request.user_id)
         if not user_profile:
             user_profile = {"user_id": request.user_id, "name": "User"}
@@ -122,11 +143,12 @@ async def chat_full(request: ChatRequest):
         print(f"Retrieved {len(history)} history items for user {request.user_id}")
         
         # 2) Generate text via the working Gemini wrapper
-        reply_text = await gemini_service.generate(
+        # gemini_service.generate is async, so it must be awaited
+        reply_text = await gemini_service.generate( # <-- FIXED
             user_message=request.message, user_name=request.user_id
         )
 
-        # Derive mode/tone locally (keeps old analytics flow working)
+        # Derive mode/tone locally
         mode = adk_service.detect_mode(request.message)
         tone = adk_service.tag_emotion(reply_text)
 
@@ -136,7 +158,7 @@ async def chat_full(request: ChatRequest):
 
         if getattr(request, "make_video", False):
             try:
-                # --- BUG FIX: Pass avatar reference images here ---
+                # --- BUG FIX: Get avatar refs from user_profile ---
                 avatar_refs = user_profile.get("avatar_reference_urls", []) 
 
                 video_job_result = await veo_service.generate_avatar_video(
@@ -206,20 +228,18 @@ async def chat(req: ChatRequest):
         ctx = await adk_service.orchestrate(user_id, message)
         suggested_mode = ctx.get("suggested_mode") or adk_service.detect_mode(message)
         
-        # --- NEW: Get the user's voice_id from the context ---
         voice_id = ctx.get("voice_id") # Fetched from user profile via ADK
 
         # 2) Generate a warm reply (Gemini wrapper or stub)
-        reply_text = await gemini_service.generate(message, user_name=user_id)
+        reply_text = await gemini_service.generate(message, user_name=user_id) # <-- FIXED
 
         # 3) Optionally kick off Veo video & ElevenLabs audio
         video_job_id: Optional[str] = None
-        audio_url: Optional[str] = None  # --- NEW: Initialize audio_url ---
+        audio_url: Optional[str] = None
 
         if getattr(req, "make_video", False):
             # --- Veo Generation (existing code) ---
             try:
-                # --- BUG FIX: You need to pass avatar reference images here ---
                 avatar_refs = ctx.get("avatar_reference_urls", []) # Get refs from ADK context
                 
                 result = await veo_service.generate_avatar_video(
@@ -236,13 +256,11 @@ async def chat(req: ChatRequest):
             # --- NEW: ElevenLabs Audio Generation ---
             if voice_id:
                 try:
-                    # 1. Generate audio bytes from text
                     audio_bytes = await elevenlabs_service.generate_speech(
                         text=reply_text,
                         voice_id=voice_id
                     
                     )
-                    # 2. Upload audio to Google Cloud Storage 
                     audio_gcs_path = f"users/{user_id}/audio/{datetime.now(timezone.utc).isoformat()}.mp3"
                     await storage_service.upload_file_bytes(
                         audio_bytes,
@@ -250,17 +268,15 @@ async def chat(req: ChatRequest):
                         content_type="audio/mpeg"
                     )
                     
-                    # 3. Get a signed URL to return to the frontend
                     audio_url = await storage_service.get_signed_url(audio_gcs_path)
 
                 except Exception as e:
                     print(f"⚠️ ElevenLabs audio generation failed in /chat: {e}")
-                    # Don't fail the chat, just return no audio
             else:
                 print(f"⚠️ No voice_id found for user {user_id}. Skipping audio generation.")
             # --- END NEW ---
 
-        # 4) Persist chat & analytics via ADK helper (Mongo + Snowflake, best-effort)
+        # 4) Persist chat & analytics via ADK helper
         log_meta = await adk_service.log_after_chat(
             user_id=user_id,
             user_message=message,
@@ -268,12 +284,12 @@ async def chat(req: ChatRequest):
             mode=suggested_mode,
         )
 
-        # 5) Return response (matches ChatResponse schema)
+        # 5) Return response
         return ChatResponse(
             text=reply_text,
             video_url=None,
             video_job_id=video_job_id,
-            audio_url=audio_url, # --- NEW: Pass the audio_url ---
+            audio_url=audio_url,
             mode=log_meta.get("mode", suggested_mode),
             emotional_tone=log_meta.get("emotional_tag", "neutral"),
         )
@@ -301,6 +317,15 @@ async def generate_avatar(
             face_captures=request.face_captures,
             age_years=request.age_progression_years,
         )
+        
+        # --- NEW ---
+        # After avatar is created, save the reference image URIs to the profile
+        if result.get("gcs_uris"):
+            await mongodb_service.update_user_profile(
+                request.user_id,
+                {"avatar_reference_urls": result.get("gcs_uris")}
+            )
+        # --- END NEW ---
 
         return VideoGenerationResponse(
             job_id=result["job_id"],
@@ -331,7 +356,7 @@ async def generate_video(request: VideoGenerationRequest):
             prompt=request.prompt,
             reference_images=request.reference_images or [],
             duration=request.duration,
-            style=request.style,  # <-- FIXED: Removed .value
+            style=request.style.value,  # ensure enum -> str
         )
 
         return VideoGenerationResponse(

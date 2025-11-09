@@ -8,12 +8,13 @@ import httpx
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
-from app.services.storage_service import storage_service
+from app.services.storage_service import StorageService
 
 # Use print instead of logger
 # logging.basicConfig(level=logging.INFO)
 # logger = logging.getLogger(__name__)
 
+storage_service = StorageService()
 
 def guess_mime(uri: str) -> str:
     u = uri.lower()

@@ -1,10 +1,11 @@
 # app/services/elevenlabs_service.py
 
 from elevenlabs.client import ElevenLabs
-from elevenlabs import Voice, VoiceSettings
-from app.config import get_settings
+from elevenlabs import VoiceSettings
 from io import BytesIO
-import asyncio  # <-- 1. IMPORT ASYNCIO
+import asyncio
+from app.config import get_settings
+from app.services.voice_analysis import get_best_matching_default_voice_from_audio
 
 class ElevenLabsService:
     def __init__(self):
@@ -18,29 +19,57 @@ class ElevenLabsService:
 
     async def clone_voice(self, audio_data: bytes, user_id: str) -> str:
         """
-        Clones a user's voice from an audio file and returns the new voice_id.
-        This is now non-blocking.
+        Attempts to clone a user's voice. If cloning fails (e.g., subscription restriction),
+        falls back to a default voice.
+        Returns a voice_id string.
         """
         try:
             audio_file = BytesIO(audio_data)
             
-            # --- 2. RUN THE BLOCKING CODE IN A SEPARATE THREAD ---
+            # Try Instant Voice Cloning (IVC)
             voice = await asyncio.to_thread(
-                self.client.voices.add,
+                self.client.voices.ivc.create,
                 name=f"Ekho User - {user_id}",
-                files=[audio_file],
-                description=f"Voice clone for Ekho user {user_id}"
+                description=f"Voice clone for Ekho user {user_id}",
+                files=[audio_file]
             )
-            # --------------------------------------------------
             
-            print(f"Cloned voice for user {user_id}. Voice ID: {voice.voice_id}")
+            print(f"✅ Cloned voice for user {user_id}. Voice ID: {voice.voice_id}")
             return voice.voice_id
-            
+        
         except Exception as e:
-            print(f"❌ Failed to clone voice for user {user_id}: {e}")
-            raise
+            # Detect subscription restriction specifically
+            msg = str(e).lower()
+            if "can_not_use_instant_voice_cloning" in msg or "subscription" in msg:
+                print(f"⚠️ Cannot clone voice for user {user_id}: {e}")
+                # --- Call the voice matching function from voice_analysis.py ---
+                voice_id = await get_best_matching_default_voice_from_audio(
+                    client=self.client,
+                    audio_data=audio_data
+                )
+                print(f"➡️ Using closest default voice ID: {voice_id}")
+                return voice_id
+            else:
+                # Raise other exceptions
+                print(f"❌ Failed to clone voice for user {user_id}: {e}")
+                raise
 
-    # --- 3. CREATE A SYNCHRONOUS HELPER FUNCTION ---
+    def get_default_voice_id(self) -> str:
+        """
+        Returns the ID of a default pre‑existing ElevenLabs voice.
+        Picks the first available voice as fallback.
+        """
+        # Use the correct method to list/s\-search voices
+        resp = self.client.voices.search(page_size=1)  # minimal query
+        voices = resp.voices
+        if not voices:
+            raise RuntimeError("No voices available in ElevenLabs account!")
+        return voices[0].voice_id
+
+
+
+
+    # --- CREATE A SYNCHRONOUS HELPER FUNCTION ---
     # We put all the blocking logic in its own function.
     def _generate_speech_sync(self, text: str, voice_id: str) -> bytes:
         """

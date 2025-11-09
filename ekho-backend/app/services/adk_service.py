@@ -101,16 +101,29 @@ class ADKAgentService:
     # Orchestration
     # -------------------------
     async def orchestrate(self, user_id: str, user_message: str) -> Dict[str, Any]:
-        mem, trends, safety = await asyncio.gather(
+        """
+        Runs all agents AND fetches user profile data in parallel for context.
+        """
+        # 1. Gather all tasks concurrently: agents + profile data
+        mem, trends, safety, profile = await asyncio.gather(
             self.memory_agent(user_id, user_message),
             self.pattern_agent(user_id),
             self.safety_agent(user_message),
+            self.mongo.get_user_profile(user_id), # <-- NEW: Fetch user profile
         )
+        
+        # 2. Extract essential fields needed by routes.py
+        voice_id = profile.get("voice_id") if profile else None
+        avatar_refs = profile.get("avatar_reference_urls", []) if profile else []
+
+        # 3. Compile final context dictionary
         return {
             "memories": mem or [],
             "trends": trends or [],
             "safety": safety,
             "suggested_mode": self.detect_mode(user_message),
+            "voice_id": voice_id,                   # <-- NOW AVAILABLE to routes.py
+            "avatar_reference_urls": avatar_refs,   # <-- NOW AVAILABLE to routes.py
         }
 
     # -------------------------
