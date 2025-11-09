@@ -119,22 +119,37 @@ class VeoServiceREST:
         duration_seconds: int,
     ) -> Dict:
         job_id = f"veo_{user_id}_{uuid.uuid4().hex[:8]}"
-        now = datetime.now(timezone.utc).isoformat() # <-- USE TIMEZONE
-
+        now = datetime.now(timezone.utc).isoformat()
+        
+        # --- FIX START: Conditional Handling for GCS URIs vs Base64 ---
+        gcs_uris: List[str] = []
+        
+        # Determine if the input list contains GCS URIs (from MongoDB) or Base64 (from frontend upload).
+        is_gcs_uris = bool(face_captures) and face_captures[0].startswith("gs://")
+        
         try:
-            print(
-                f"[{job_id}] Uploading {len(face_captures[:3])} reference images for {user_id}"
-            )
+            if not face_captures:
+                # Fail if no images are provided
+                raise RuntimeError("No avatar reference images found for video generation.")
 
-            # This now calls the fully async upload_reference_images
-            gcs_uris = await storage_service.upload_reference_images(
-                user_id=user_id,
-                face_captures=face_captures[:3],
-                job_id=job_id,
-            )
-
+            if is_gcs_uris:
+                # Case 1: Input is GCS URIs (from ADK/MongoDB for /chat)
+                gcs_uris = face_captures[:3]
+                print(f"[{job_id}] Skipping upload. Using {len(gcs_uris)} existing GCS URIs from profile.")
+            else:
+                # Case 2: Input is Base64 (from /generate-avatar)
+                print(
+                    f"[{job_id}] Uploading {len(face_captures[:3])} reference images for {user_id}"
+                )
+                gcs_uris = await storage_service.upload_reference_images(
+                    user_id=user_id,
+                    face_captures=face_captures[:3],
+                    job_id=job_id,
+                )
+            
             if not gcs_uris:
-                raise RuntimeError("No reference images uploaded to GCS.")
+                raise RuntimeError("No valid reference images were found or uploaded.")
+        # --- FIX END ---
 
             print(f"[{job_id}] GCS URIs: {gcs_uris}")
 

@@ -47,7 +47,7 @@ default_output_uri = f"gs://{settings.storage_bucket}/video-outputs/"
 
 veo_service = VeoServiceREST(project_id=settings.google_cloud_project,
                              location=settings.google_cloud_location,
-                             model_id="veo-3.1-fast-generate-preview",
+                             model_id="veo-3.1-generate-preview",
                              output_storage_uri=default_output_uri
                              )
 
