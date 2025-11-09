@@ -17,13 +17,9 @@ from app.services.storage_service import StorageService
 from app.services.mongodb_service import MongoDBService
 from app.services.snowflake_service import SnowflakeService
 from app.services.gemini_service import GeminiService
-<<<<<<< Updated upstream
-from datetime import datetime, timezone
-=======
 
 # 🔹 ADK orchestration
 from app.services.adk_service import adk_service
->>>>>>> Stashed changes
 
 router = APIRouter(prefix="/api/v1", tags=["ekho"])
 
@@ -73,34 +69,10 @@ async def chat_full(request: ChatRequest):
             user_profile = {"user_id": request.user_id, "name": "User"}
         history = await mongodb_service.get_conversation_history(request.user_id)
         print(f"Retrieved {len(history)} history items for user {request.user_id}")
-        """
-        # --- 5. MOCK GEMINI RESPONSE BLOCK ---
-        # This block simulates the output from GeminiService
-        # We'll create a fake response based on the user's message
         
-        mock_mode = "therapist" if "sad" in request.message else "casual"
-        mock_tone = "anxious" if "sad" in request.message else "neutral"
-
-<<<<<<< Updated upstream
-        gemini_response = {
-            "text": f"This is a mocked AI response to: '{request.message}'",
-            "mode": mock_mode,
-            "emotional_tone": mock_tone
-        }
-        # --- END OF MOCK BLOCK ---
-
-        """
-        # 2. Call Gemini service for text response
-        gemini_response = await gemini_service.generate_response(
-            user_message=request.message,
-            conversation_history=history,
-            user_profile=user_profile,
-            mode=request.mode
-=======
         # 2) Generate text via the working Gemini wrapper
         reply_text = gemini_service.generate(
             user_message=request.message, user_name=request.user_id
->>>>>>> Stashed changes
         )
 
         # Derive mode/tone locally (keeps old analytics flow working)
@@ -314,38 +286,3 @@ async def get_user_jobs(user_id: str):
         return {"user_id": user_id, "jobs": jobs, "count": len(jobs)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-<<<<<<< Updated upstream
-
-"""
-# -------------------------
-# Chat endpoint
-# -------------------------
-@router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    """"""
-    User sends message, get AI response text.
-    If make_video=True, also start Veo generation and return video_job_id.
-    """"""
-    # 1) text reply (Gemini or stub)
-    reply = gemini_service.generate(req.message, user_name=req.user_id)
-
-    # 2) optionally kick off Veo video in background
-    video_job_id = None
-    if req.make_video:
-        try:
-            result = await veo_service.generate_avatar_video(
-                user_id=req.user_id,
-                prompt=reply,                  # have the avatar say the reply
-                reference_images=[],           # pass refs if you have them
-                duration=10,
-                style="conversational"         # keep simple for demo
-            )
-            video_job_id = result.get("job_id")
-        except Exception as e:
-            # don't fail chat if video kickoff fails
-            print("⚠️ Veo kick-off failed in /chat:", e)
-
-    return ChatResponse(text=reply, video_job_id=video_job_id)
-"""
-=======
->>>>>>> Stashed changes
