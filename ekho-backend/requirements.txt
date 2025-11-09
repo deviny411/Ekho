@@ -17,3 +17,9 @@ aiofiles==24.1.0
 httpx==0.28.1
 python-multipart==0.0.20
 pillow==11.0.0
+
+# MongoDB
+motor
+
+# Snowflake
+snowflake-connector-python==4.0.0

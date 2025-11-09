@@ -1,7 +1,6 @@
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from enum import Enum
-from datetime import datetime
 
 class VideoStyle(str, Enum):
     """Video generation style presets."""
@@ -17,7 +16,7 @@ class VideoGenerationRequest(BaseModel):
     reference_images: Optional[List[str]] = None  # Base64 encoded
     style: VideoStyle = VideoStyle.CONVERSATIONAL
     user_id: str
-    
+
     @validator('reference_images')
     def validate_reference_images(cls, v):
         if v and len(v) > 5:
@@ -47,7 +46,7 @@ class AvatarCreationRequest(BaseModel):
     face_captures: List[str] = Field(..., min_items=3, max_items=5)  # Base64 images
     voice_sample: Optional[str] = None  # Base64 audio (for future)
     age_progression_years: int = Field(default=5, ge=3, le=10)
-    
+
     @validator('face_captures')
     def validate_face_captures(cls, v):
         if not v or len(v) < 3:
@@ -60,3 +59,18 @@ class HealthCheckResponse(BaseModel):
     service: str
     timestamp: str
     google_cloud_connected: bool
+
+# -------------------------
+# Chat models
+# -------------------------
+class ChatRequest(BaseModel):
+    user_id: str
+    message: str = Field(..., min_length=1, max_length=2000)
+    make_video: bool = False  # NEW: optionally kick off a Veo clip
+
+class ChatResponse(BaseModel):
+    text: str
+    video_url: Optional[str] = None
+    video_job_id: Optional[str] = None  # NEW: return job id if make_video=True
+    mode: Optional[str] = None
+    emotional_tone: Optional[str] = None
