@@ -76,7 +76,7 @@ class VeoServiceREST:
 
         prompt = (
             f"Portrait video of this person, aged {age_years} years older. "
-            f"Natural, calm expression, subtle smile, direct eye contact, "
+            f"Natural, calm expression, subtle kind grin, talking in a gentle manner, "
             f"soft professional lighting, neutral background."
         )
 
