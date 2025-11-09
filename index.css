@@ -1,0 +1,145 @@
+/* ekho-frontend/src/index.css (Highly Polished Dark Theme) */
+
+/* 1. Import Professional Font: Poppins */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+
+/* --- Global Variables for Dark Theme --- */
+:root {
+  --color-bg-primary: #121212;   /* Deep black background */
+  --color-bg-secondary: #1f1f1f; /* Main card background */
+  --color-text-primary: #e0e0e0; /* Light gray text */
+  --color-accent: #6c5ce7;      /* Vivid Purple Accent */
+  --color-accent-hover: #a29bfe;
+  --color-border: #333;
+  --color-success: #00b894;     /* Teal Green for success */
+  --color-error: #ff7675;       /* Soft Red for errors */
+}
+
+/* --- Global Reset & Typography --- */
+body {
+  margin: 0;
+  /* Use Poppins as the primary font */
+  font-family: 'Poppins', sans-serif;
+  font-weight: 300;
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  line-height: 1.6;
+}
+
+h1 {
+  color: var(--color-accent);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  border-bottom: 2px solid var(--color-border);
+  padding-bottom: 10px;
+}
+
+h2, h3 {
+    font-weight: 500;
+}
+
+/* --- Layout Container (Main Card) --- */
+.ekho-container {
+  max-width: 1000px;
+  margin: 40px auto;
+  padding: 30px;
+  background-color: var(--color-bg-secondary);
+  border-radius: 20px; /* Softer rounded edges */
+  /* Visually appealing shadow/depth */
+  box-shadow: 
+    0 10px 20px rgba(0, 0, 0, 0.5), /* Outer shadow */
+    inset 0 0 5px rgba(255, 255, 255, 0.05); /* Inner light reflection */
+}
+
+/* --- Buttons & Interactive Elements --- */
+button {
+  cursor: pointer;
+  padding: 12px 24px;
+  border: none;
+  border-radius: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  transition: all 0.3s ease;
+  background-color: var(--color-accent);
+  color: var(--color-text-primary);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+}
+
+button:hover:not(:disabled) {
+  background-color: var(--color-accent-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 15px rgba(0, 0, 0, 0.6);
+}
+
+button:disabled {
+  background-color: #333;
+  color: #777;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* --- Forms & Inputs --- */
+input[type="text"], input[type="file"], input[type="range"] {
+  background-color: #121212;
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.4);
+}
+
+/* --- Tab Header Styling --- */
+.tab-header {
+  display: flex;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 30px;
+}
+
+.tab-button {
+  padding: 15px 25px;
+  margin-right: 5px;
+  background: transparent;
+  color: var(--color-text-primary);
+  border: none;
+  border-bottom: 3px solid transparent;
+  font-weight: 400;
+  transition: all 0.3s ease;
+}
+
+.tab-button.active {
+  color: var(--color-accent-hover);
+  border-bottom: 3px solid var(--color-accent);
+  background-color: #252526;
+}
+
+
+/* --- Highly Visual Component Styles --- */
+
+/* Voice Cloner / Avatar Creator Card */
+.feature-card {
+    background-color: #181818;
+    border: 1px solid #333;
+    border-radius: 16px;
+    padding: 30px;
+    margin-bottom: 25px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.4);
+}
+
+/* Input File Styling */
+input[type="file"] {
+    cursor: pointer;
+    border: 2px dashed var(--color-accent);
+    background-color: #121212;
+    text-align: center;
+    padding: 20px;
+}
+
+/* Success/Error Messages */
+.message-success {
+    color: var(--color-success);
+    font-weight: 500;
+}
+.message-error {
+    color: var(--color-error);
+    font-weight: 500;
+}
